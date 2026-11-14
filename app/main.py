@@ -1,64 +1,122 @@
-"""FastAPI 应用：罕见病人群组合计发布的组合泄露核查服务。
+"""罕见病分批补报对账服务。
 
-并发模型
+数据模型
 --------
-发布申请在进程级 ``threading.RLock`` 内串行处理：每个请求都基于
-“截至它实际取得锁时”的累计历史重新核查，因此并发申请按实际发布次序
-逐条接受/拒绝，不可能各自通过后共同泄密。锁内同时完成 MILP 核查与
-SQLite 写入，拒绝、无定论或保存失败时历史保持不变。
+* **底表**：首次上传后永久固定的组名与人数；之后任何路径都不会修改它，
+  因此底表与底表合计（已公布合计）在重启、换批次、上传失败后都不变。
+* **批次明细**：网页按批次上传含 ``patient_id, group`` 的 CSV；
+  再次上传同名批次即**整批替换**该批次明细，组名必须是底表中的组。
+* **对账报告**：按当前所有批次的 ``patient_id`` 去重——同组重复只计一人，
+  跨组出现的 ID 列为冲突且不计入任何组；逐组给出去重人数、底表人数、差值；
+  只有无冲突且各组差值均为 0 才显示对账通过。
+
+一致性
+------
+* 批次替换是单个 SQLite 写事务；报告读取是单个读事务快照。
+  两个 Web 进程并发重传同一批次时，任何一次读取只能看到某个完整版本。
+* 解析失败（400）或保存失败（500）不会触碰旧批次，旧批次与对账结果继续可用。
 """
 
 from __future__ import annotations
 
 import os
-import threading
+import re
+import sqlite3
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
-from .checker import check_publication
-from .csv_utils import CSVValidationError, parse_base_table
-from .database import Database
+from .csv_utils import (
+    CSVValidationError,
+    parse_base_csv,
+    parse_batch_csv,
+)
+from .database import Database, DatabaseError
+from .reconcile import reconcile
 
-DB_PATH = os.environ.get("APP_DB_PATH", str(Path(__file__).resolve().parent.parent / "data" / "app.db"))
+DB_PATH = os.environ.get(
+    "APP_DB_PATH",
+    str(Path(__file__).resolve().parent.parent / "data" / "app.db"),
+)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+SAMPLES_DIR = Path(__file__).resolve().parent.parent / "samples"
 
-# 保密阈值：真实人数落在 [1, 4] 的组需要保密（0 人与 ≥5 人组不在保护范围）。
-SECRET_MIN = 1
-SECRET_MAX = 4
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024  # 2 MiB，超过即拒绝，避免撑爆内存
+MAX_BATCH_NAME = 64
+# 批次名不允许控制字符、首尾空白；允许中英文、数字、下划线、点、横线。
+_BATCH_NAME_RE = re.compile(r"^[\w.\-]+$", re.UNICODE)
 
-app = FastAPI(title="群组合计发布泄露核查", version="1.0.0")
+app = FastAPI(title="罕见病分批补报对账", version="2.0.0")
 db = Database(DB_PATH)
-# 发布/上传串行化。RLock 便于同一线程内嵌套调用。
-_publish_lock = threading.RLock()
+# 演示用 CSV 只读发布，网页可直接载入样例文件。
+app.mount("/samples", StaticFiles(directory=SAMPLES_DIR), name="samples")
 
 
-class PublishRequest(BaseModel):
-    groups: list[str] = Field(..., min_length=1, description="本次申请公布合计所勾选的组名")
+# ---------------------------------------------------------------- 辅助
+
+def _read_upload(file: UploadFile) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = file.file.read(64 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"CSV 超过 {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB 上限",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
-def _state_payload() -> dict:
-    base = db.get_base_table()
-    if base is None:
-        return {"initialized": False, "groups": [], "total": None, "history": []}
-    names, sizes, total = base
-    groups = [
-        {
-            "name": name,
-            "size": size,
-            "secret": SECRET_MIN <= size <= SECRET_MAX,
-        }
-        for name, size in zip(names, sizes)
-    ]
+def _validate_batch_name(raw: str | None) -> str:
+    name = (raw or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="请填写批次名")
+    if len(name) > MAX_BATCH_NAME:
+        raise HTTPException(
+            status_code=400, detail=f"批次名最多 {MAX_BATCH_NAME} 个字符"
+        )
+    if not _BATCH_NAME_RE.fullmatch(name):
+        raise HTTPException(
+            status_code=400,
+            detail="批次名只能包含中英文、数字、下划线、点或横线",
+        )
+    return name
+
+
+def _payload(snapshot: dict) -> dict:
+    """把一个数据库快照转换为对账报告 + 状态。纯函数，保证两者同源。"""
+    base: list[tuple[str, int]] = snapshot["base"]
+    report = reconcile(base, snapshot["rows"]).as_dict()
+    report["base_total"] = sum(size for _, size in base)
+    initialized = bool(base)
     return {
-        "initialized": True,
-        "groups": groups,
-        "total": total,
-        "history": db.list_publications(),
+        "initialized": initialized,
+        "base": (
+            {
+                "groups": [
+                    {"name": name, "count": count} for name, count in base
+                ],
+                "total": sum(size for _, size in base),
+            }
+            if initialized
+            else None
+        ),
+        "batches": snapshot["batches"],
+        "report": report,
     }
 
+
+def _current_payload() -> dict:
+    return _payload(db.snapshot())
+
+
+# ---------------------------------------------------------------- 路由
 
 @app.get("/")
 def index() -> FileResponse:
@@ -67,83 +125,74 @@ def index() -> FileResponse:
 
 @app.get("/api/state")
 def get_state() -> dict:
-    return _state_payload()
+    """底表、批次列表与对账报告，全部来自同一个已提交快照。"""
+    return _current_payload()
 
 
-@app.post("/api/upload")
-def upload_csv(file: UploadFile = File(...)) -> dict:
-    raw = file.file.read()
+@app.post("/api/base")
+def upload_base(file: UploadFile = File(...)) -> dict:
+    """首次上传并固定底表；底表已存在时返回 409，绝不覆盖。"""
+    raw = _read_upload(file)
     try:
-        groups, total = parse_base_table(raw)
+        groups = parse_base_csv(raw)
     except CSVValidationError as exc:
-        raise HTTPException(status_code=400, detail=f"CSV 校验失败：{exc}") from exc
+        raise HTTPException(status_code=400, detail=f"底表 CSV 校验失败：{exc}") from exc
 
-    with _publish_lock:
-        if db.has_base_table():
-            raise HTTPException(status_code=409, detail="底表已固定，不能重复上传；历史数据沿用")
-        try:
-            db.insert_base_table(groups, total)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return _state_payload()
+    try:
+        db.insert_base_table(groups)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (DatabaseError, sqlite3.Error) as exc:
+        raise HTTPException(
+            status_code=500, detail=f"底表保存失败，未做任何修改：{exc}"
+        ) from exc
+
+    payload = _current_payload()
+    payload["message"] = "底表已固定"
+    return payload
 
 
-@app.post("/api/publish")
-def publish(req: PublishRequest) -> dict:
-    with _publish_lock:
-        base = db.get_base_table()
-        if base is None:
-            raise HTTPException(status_code=409, detail="底表尚未上传，无法受理发布申请")
-        names, sizes, total = base
+@app.post("/api/batches")
+def upload_batch(
+    file: UploadFile = File(...),
+    batch_name: str | None = Form(None),
+) -> dict:
+    """上传（或整批替换）一个批次。
 
-        selection = req.groups
-        if len(selection) != len(set(selection)):
-            raise HTTPException(status_code=400, detail="勾选的组名存在重复")
-        unknown = [g for g in selection if g not in set(names)]
-        if unknown:
-            raise HTTPException(status_code=400, detail=f"存在未知组名：{unknown}")
+    * 解析/校验失败 → 400，旧批次与对账结果保持可用；
+    * 底表尚未上传 → 409；
+    * 保存失败 → 500，事务回滚，旧批次保持可用。
+    """
+    name = _validate_batch_name(batch_name)
+    raw = _read_upload(file)
 
-        # 本次合计直接由底表计算（合计本身就是申请公布的数字，
-        # 核查关注的是它与历次合计联立后能否反推出保密组人数）。
-        size_of = dict(zip(names, sizes))
-        current_total = sum(size_of[name] for name in selection)
+    snapshot = db.snapshot()
+    base: list[tuple[str, int]] = snapshot["base"]
+    if not base:
+        raise HTTPException(status_code=409, detail="底表尚未上传，无法上传批次")
 
-        history = db.list_publications()
-        result = check_publication(
-            group_names=names,
-            secret_flags=[SECRET_MIN <= s <= SECRET_MAX for s in sizes],
-            total=total,
-            history_selections=[pub["selected_groups"] for pub in history],
-            history_totals=[pub["published_total"] for pub in history],
-            current_selection=selection,
-            current_total=current_total,
-        )
+    allowed = {group for group, _ in base}
+    try:
+        rows = parse_batch_csv(raw, allowed)
+    except CSVValidationError as exc:
+        raise HTTPException(status_code=400, detail=f"批次 CSV 校验失败：{exc}") from exc
 
-        if result.inconclusive:
-            # 求解无定论：不发布，历史不变。
-            raise HTTPException(
-                status_code=503,
-                detail=f"整数解核查无定论，出于保密不予发布：{result.reason}",
-            )
-        if result.leaked_groups:
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "detail": "发布被拒绝：联立全部约束后，以下保密组的人数在所有可行整数底表中取值唯一，会泄露小组人数",
-                    "leaked_groups": result.leaked_groups,
-                    "history_unchanged": True,
-                },
-            )
+    try:
+        db.replace_batch(name, [(row.patient_id, row.group) for row in rows])
+    except (DatabaseError, sqlite3.Error) as exc:
+        raise HTTPException(
+            status_code=500, detail=f"批次保存失败，旧批次未受影响：{exc}"
+        ) from exc
 
-        try:
-            record = db.insert_publication(selection, current_total)
-        except Exception as exc:  # 保存失败：不发布，历史不变
-            raise HTTPException(
-                status_code=500, detail=f"保存发布记录失败，本次合计未发布：{exc}"
-            ) from exc
+    payload = _current_payload()
+    uploaded = next(
+        (b for b in payload["batches"] if b["name"] == name), None
+    )
+    payload["uploaded_batch"] = uploaded
+    return payload
 
-        return {
-            "accepted": True,
-            "publication": record,
-            "state": _state_payload(),
-        }
+
+@app.get("/api/report")
+def get_report() -> dict:
+    """仅返回对账报告（与 /api/state 使用同一快照构造方式）。"""
+    return _payload(db.snapshot())["report"]

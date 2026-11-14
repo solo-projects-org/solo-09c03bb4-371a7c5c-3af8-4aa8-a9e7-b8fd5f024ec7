@@ -3,198 +3,315 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>群组合计发布 · 组合泄露核查</title>
+<title>罕见病分批补报 · 底表对账</title>
 <style>
   :root { --bg:#f5f7fa; --card:#fff; --line:#d9dee7; --ink:#1f2933; --muted:#6b7280;
           --blue:#2563eb; --red:#dc2626; --green:#15803d; --amber:#b45309; }
   * { box-sizing: border-box; }
-  body { margin:0; font-family: "PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif;
+  body { margin:0; font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif;
          background:var(--bg); color:var(--ink); line-height:1.55; }
   header { background:#111827; color:#fff; padding:18px 28px; }
   header h1 { margin:0 0 4px; font-size:20px; }
   header p { margin:0; color:#9ca3af; font-size:13px; }
-  main { max-width:1080px; margin:24px auto; padding:0 16px; display:grid; gap:20px; }
+  main { max-width:1120px; margin:24px auto; padding:0 16px; display:grid; gap:20px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px; }
   .card h2 { margin:0 0 12px; font-size:16px; }
   .muted { color:var(--muted); font-size:13px; }
   table { width:100%; border-collapse:collapse; font-size:14px; }
   th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
   th { color:var(--muted); font-weight:600; font-size:12px; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
   .tag { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; }
-  .tag-secret { background:#fee2e2; color:var(--red); }
-  .tag-open { background:#dcfce7; color:var(--green); }
-  .group-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:10px; margin:12px 0; }
-  .group-item { display:flex; align-items:center; gap:8px; border:1px solid var(--line);
-                border-radius:8px; padding:10px 12px; cursor:pointer; user-select:none; }
-  .group-item input { accent-color:var(--blue); width:16px; height:16px; }
-  .group-item.secret { border-color:#fecaca; background:#fff7f7; }
+  .tag-ok { background:#dcfce7; color:var(--green); }
+  .tag-bad { background:#fee2e2; color:var(--red); }
+  .tag-warn { background:#fef3c7; color:var(--amber); }
+  .tag-info { background:#e0e7ff; color:#3730a3; }
+  .field { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0; }
+  .field label { font-size:14px; color:var(--muted); }
+  input[type=text], input[type=file] { border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:14px; background:#fff; }
+  input[type=text] { min-width:220px; }
   button { border:0; border-radius:8px; padding:9px 18px; font-size:14px; cursor:pointer; }
   .btn-primary { background:var(--blue); color:#fff; }
   .btn-primary:disabled { background:#93b4f5; cursor:not-allowed; }
-  .btn-ghost { background:#eef2f7; color:var(--ink); }
   .alert { border-radius:8px; padding:12px 14px; font-size:14px; margin-top:12px; white-space:pre-wrap; }
   .alert-error { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }
   .alert-ok { background:#f0fdf4; border:1px solid #bbf7d0; color:#166534; }
   .alert-warn { background:#fffbeb; border:1px solid #fde68a; color:#92400e; }
+  .banner { border-radius:10px; padding:14px 18px; font-size:15px; margin-bottom:14px; display:flex;
+            align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .banner-pass { background:#f0fdf4; border:1px solid #bbf7d0; color:#166534; }
+  .banner-fail { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }
+  .banner-empty { background:#eff6ff; border:1px solid #bfdbfe; color:#1e40af; }
   code { background:#f1f5f9; padding:1px 6px; border-radius:4px; font-size:12px; }
-  .demo-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
-  .pill { font-size:12px; border:1px dashed var(--line); background:#fafbfc; border-radius:999px;
-          padding:4px 10px; cursor:pointer; }
   .empty { color:var(--muted); font-size:13px; padding:14px 0; }
-  .sum-line { font-size:14px; margin:10px 0; }
-  .sum-line b { font-size:18px; }
+  .diff-pos { color:var(--red); font-weight:600; }
+  .diff-neg { color:var(--amber); font-weight:600; }
+  .diff-zero { color:var(--green); font-weight:600; }
+  .hint { font-size:12px; color:var(--muted); margin-top:10px; }
+  .conflict-id { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 </style>
 </head>
 <body>
 <header>
-  <h1>罕见病人群组合计发布 · 组合泄露核查</h1>
-  <p>各组人数视为未知非负整数，仅以公开总人数、历次已公布合计与本次合计建立约束；
-     任一保密组（真实 1～4 人）在全部可行整数底表中取值唯一即拒绝发布。</p>
+  <h1>罕见病分批补报 · 底表对账</h1>
+  <p>按当前全部批次的 patient_id 去重：同组重复只计一人，跨组出现计为冲突且不计入任何组；
+     逐组比较去重人数与固定底表人数，无冲突且各组相等才算对账通过。</p>
 </header>
 
 <main>
-  <section class="card" id="upload-card">
-    <h2>1. 上传底表 CSV（首次上传后固定，重启沿用）</h2>
-    <p class="muted">CSV 需含表头与两列，例如 <code>group,count</code>；2～16 个唯一组名，人数为 0～1000 的整数。</p>
-    <input type="file" id="csv-file" accept=".csv,text/csv" />
-    <div style="margin-top:10px">
-      <button class="btn-primary" id="upload-btn">上传并固定底表</button>
+  <section class="card" id="base-card">
+    <h2>1. 固定底表（首次上传后不再改变）</h2>
+    <p class="muted">CSV 需含 <code>group,count</code> 两列；2～16 个唯一组名，人数为 0～1000 的整数。
+       底表一经固定，任何批次上传都不会修改它，重启后仍沿用。</p>
+    <div class="field">
+      <input type="file" id="base-file" accept=".csv,text/csv" />
+      <button class="btn-primary" id="base-btn">上传并固定底表</button>
     </div>
-    <div id="upload-msg"></div>
-  </section>
-
-  <section class="card" id="base-card" hidden>
-    <h2>2. 底表与保密标记</h2>
-    <p class="muted">总人数视为公开；标记为“保密”的组真实人数在 1～4 之间，网页仅对数据员展示，外部发布模型不含此信息。</p>
-    <table>
-      <thead><tr><th>组名</th><th>真实人数（仅数据员可见）</th><th>保密状态</th></tr></thead>
-      <tbody id="base-tbody"></tbody>
-    </table>
-    <p class="sum-line">公开总人数：<b id="total-val"></b></p>
-  </section>
-
-  <section class="card" id="publish-card" hidden>
-    <h2>3. 勾选组并申请公布合计</h2>
-    <div class="group-grid" id="group-grid"></div>
-    <p class="sum-line">本次申请合计（按底表计算）：<b id="current-sum">0</b></p>
-    <button class="btn-primary" id="publish-btn">提交发布申请</button>
-    <div class="demo-row">
-      <span class="muted" style="align-self:center">演示组合（点击填充勾选）：</span>
-      <span class="pill" data-groups='["B","C"]'>① B+C（可发布，合计 30）</span>
-      <span class="pill" data-groups='["A","C"]'>② A+C（可发布，合计 22）</span>
-      <span class="pill" data-groups='["A","B"]'>③ A+B（联立①②后泄露 A，被拒）</span>
-      <span class="pill" data-groups='["A"]'>备选：只发 A（直接被拒）</span>
+    <div class="field" id="base-demo" hidden>
+      <span class="muted">演示底表：</span>
+      <span class="pill" id="load-base-sample" style="cursor:pointer;text-decoration:underline">载入 samples/base_sample.csv</span>
     </div>
-    <div id="publish-msg"></div>
+    <div id="base-msg"></div>
+    <div id="base-view" hidden style="margin-top:14px">
+      <table>
+        <thead><tr><th>组名</th><th class="num">底表人数</th></tr></thead>
+        <tbody id="base-tbody"></tbody>
+      </table>
+      <p class="hint">底表合计（已公布合计）：<b id="base-total"></b></p>
+    </div>
   </section>
 
-  <section class="card" id="history-card" hidden>
-    <h2>4. 发布历史（按实际发布次序）</h2>
-    <table>
-      <thead><tr><th>#</th><th>发布时间</th><th>选中组</th><th>公布合计</th></tr></thead>
-      <tbody id="history-tbody"></tbody>
+  <section class="card" id="batch-card" hidden>
+    <h2>2. 上传批次（同名批次再次上传即整批替换）</h2>
+    <p class="muted">CSV 需含 <code>patient_id,group</code> 两列；组名必须存在于底表。
+       上传解析失败或保存失败时，原批次与对账结果保持可用。</p>
+    <div class="field">
+      <input type="text" id="batch-name" placeholder="批次名，例如 2026-11 补报" maxlength="64" />
+      <input type="file" id="batch-file" accept=".csv,text/csv" />
+      <button class="btn-primary" id="batch-btn">上传 / 替换该批次</button>
+    </div>
+    <div id="batch-msg"></div>
+    <div class="field" style="margin-top:12px">
+      <span class="muted">演示数据（点击载入到上面的文件框）：</span>
+      <span class="pill demo-csv" data-path="samples/batch_a_first.csv" data-batch="batch-a" style="cursor:pointer;text-decoration:underline">批次 A 首报</span>
+      <span class="pill demo-csv" data-path="samples/batch_b_first.csv" data-batch="batch-b" style="cursor:pointer;text-decoration:underline">批次 B 首报（跨批重复）</span>
+      <span class="pill demo-csv" data-path="samples/batch_a_corrected.csv" data-batch="batch-a" style="cursor:pointer;text-decoration:underline">批次 A 纠正后重传</span>
+    </div>
+    <table style="margin-top:14px">
+      <thead><tr><th>批次</th><th class="num">行数</th><th class="num">版本</th><th>更新时间</th><th>内容指纹</th></tr></thead>
+      <tbody id="batch-tbody"></tbody>
     </table>
+  </section>
+
+  <section class="card" id="report-card" hidden>
+    <h2>3. 对账报告（按当前全部批次去重）</h2>
+    <div id="verdict"></div>
+    <table>
+      <thead><tr>
+        <th>组名</th><th class="num">去重人数</th><th class="num">底表人数</th>
+        <th class="num">差值</th><th>状态</th>
+      </tr></thead>
+      <tbody id="report-tbody"></tbody>
+      <tfoot><tr>
+        <th>合计</th><th class="num" id="sum-dedup"></th><th class="num" id="sum-base"></th>
+        <th class="num" id="sum-diff"></th><th></th>
+      </tr></tfoot>
+    </table>
+    <p class="hint" id="report-stats"></p>
+    <div id="conflicts" style="margin-top:14px"></div>
   </section>
 </main>
 
 <script>
 const $ = (id) => document.getElementById(id);
-let currentState = null;
+let state = null;
+let demoFiles = new Map(); // 演示文件内容缓存
 
 function showMsg(el, kind, text) {
   el.innerHTML = `<div class="alert alert-${kind}">${text}</div>`;
 }
 function clearMsg(el) { el.innerHTML = ""; }
 
-async function refresh() {
-  const res = await fetch("/api/state");
-  const state = await res.json();
-  currentState = state;
-  if (!state.initialized) {
-    $("base-card").hidden = true; $("publish-card").hidden = true; $("history-card").hidden = true;
+function diffClass(d) {
+  if (d === 0) return "diff-zero";
+  return d > 0 ? "diff-pos" : "diff-neg";
+}
+
+function render(newState) {
+  state = newState;
+  const initialized = state.initialized;
+
+  $("base-demo").hidden = initialized;
+  $("base-view").hidden = !initialized;
+  $("batch-card").hidden = !initialized;
+  $("report-card").hidden = !initialized;
+
+  if (!initialized) {
+    $("base-btn").disabled = false;
     return;
   }
-  $("base-card").hidden = false; $("publish-card").hidden = false; $("history-card").hidden = false;
-  $("total-val").textContent = state.total;
+  $("base-btn").disabled = true;
 
-  $("base-tbody").innerHTML = state.groups.map(g =>
-    `<tr><td>${g.name}</td><td>${g.size}</td>
-     <td><span class="tag ${g.secret ? "tag-secret" : "tag-open"}">${g.secret ? "保密（1～4 人）" : "非保密"}</span></td></tr>`
+  // 底表
+  $("base-tbody").innerHTML = state.base.groups.map(g =>
+    `<tr><td>${escapeHtml(g.name)}</td><td class="num">${g.count}</td></tr>`
+  ).join("");
+  $("base-total").textContent = state.base.total;
+
+  // 批次
+  const bt = $("batch-tbody");
+  if (state.batches.length === 0) {
+    bt.innerHTML = `<tr><td colspan="5" class="empty">尚无批次</td></tr>`;
+  } else {
+    bt.innerHTML = state.batches.map(b =>
+      `<tr><td>${escapeHtml(b.name)}</td><td class="num">${b.row_count}</td>
+       <td class="num">v${b.revision}</td><td>${b.updated_at}</td>
+       <td><code>${b.digest}</code></td></tr>`).join("");
+  }
+
+  // 报告
+  const r = state.report;
+  const verdict = $("verdict");
+  if (r.total_rows === 0) {
+    verdict.innerHTML = `<div class="banner banner-empty">尚未上传任何批次明细，暂无可对账数据。</div>`;
+  } else if (r.passed) {
+    verdict.innerHTML = `<div class="banner banner-pass"><b>对账通过</b>
+      <span>无冲突，且每个组的去重人数都与底表一致。</span></div>`;
+  } else {
+    const reasons = [];
+    if (r.conflict_count > 0) reasons.push(`${r.conflict_count} 个 patient_id 跨组出现（冲突）`);
+    const mismatched = r.groups.filter(g => g.difference !== 0);
+    if (mismatched.length) reasons.push(`${mismatched.length} 个组的人数与底表不一致`);
+    verdict.innerHTML = `<div class="banner banner-fail"><b>对账未通过</b>
+      <span>${escapeHtml(reasons.join("；") || "存在差异")}</span></div>`;
+  }
+
+  $("report-tbody").innerHTML = r.groups.map(g =>
+    `<tr><td>${escapeHtml(g.group)}</td><td class="num">${g.dedup_count}</td>
+     <td class="num">${g.base_count}</td>
+     <td class="num ${diffClass(g.difference)}">${g.difference > 0 ? "+" : ""}${g.difference}</td>
+     <td>${g.matched ? '<span class="tag tag-ok">一致</span>' : '<span class="tag tag-bad">不一致</span>'}</td></tr>`
   ).join("");
 
-  const grid = $("group-grid");
-  grid.innerHTML = state.groups.map(g =>
-    `<label class="group-item ${g.secret ? "secret" : ""}">
-       <input type="checkbox" name="grp" value="${g.name}">
-       <span>${g.name}${g.secret ? ' <span class="tag tag-secret">保密</span>' : ""}</span>
-     </label>`).join("");
-  grid.querySelectorAll("input").forEach(cb => cb.addEventListener("change", updateSum));
+  const dedupTotal = r.groups.reduce((a, g) => a + g.dedup_count, 0);
+  const baseTotal = r.groups.reduce((a, g) => a + g.base_count, 0);
+  const diffTotal = dedupTotal - baseTotal;
+  $("sum-dedup").textContent = dedupTotal;
+  $("sum-base").textContent = baseTotal;
+  $("sum-diff").innerHTML = `<span class="${diffClass(diffTotal)}">${diffTotal > 0 ? "+" : ""}${diffTotal}</span>`;
+  $("report-stats").textContent =
+    `总行数 ${r.total_rows}，去重后 patient_id ${r.total_patients} 个，` +
+    `重复行 ${r.duplicate_rows} 行，冲突 ID ${r.conflict_count} 个。`;
 
-  const tbody = $("history-tbody");
-  if (state.history.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="4" class="empty">暂无发布记录</td></tr>`;
+  // 冲突
+  const cf = $("conflicts");
+  if (r.conflicts.length === 0) {
+    cf.innerHTML = "";
   } else {
-    tbody.innerHTML = state.history.map((h, i) =>
-      `<tr><td>${i + 1}</td><td>${h.created_at}</td>
-       <td>${h.selected_groups.join("、")}</td><td>${h.published_total}</td></tr>`).join("");
+    cf.innerHTML =
+      `<h3 style="font-size:14px;margin:0 0 8px;color:var(--red)">跨组冲突 patient_id（不计入任何组）</h3>` +
+      `<table><thead><tr><th>patient_id</th><th>出现的组</th></tr></thead><tbody>` +
+      r.conflicts.map(c =>
+        `<tr><td class="conflict-id">${escapeHtml(c.patient_id)}</td>
+         <td>${c.groups.map(g => `<span class="tag tag-warn">${escapeHtml(g)}</span>`).join(" ")}</td></tr>`
+      ).join("") + `</tbody></table>`;
   }
 }
 
-function selectedGroups() {
-  return [...document.querySelectorAll('input[name="grp"]:checked')].map(cb => cb.value);
-}
-function updateSum() {
-  if (!currentState) return;
-  const sizeOf = Object.fromEntries(currentState.groups.map(g => [g.name, g.size]));
-  const total = selectedGroups().reduce((acc, name) => acc + sizeOf[name], 0);
-  $("current-sum").textContent = total;
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[ch]));
 }
 
-document.querySelectorAll(".pill").forEach(pill => {
-  pill.addEventListener("click", () => {
-    const wanted = JSON.parse(pill.dataset.groups);
-    document.querySelectorAll('input[name="grp"]').forEach(cb => {
-      cb.checked = wanted.includes(cb.value);
-    });
-    updateSum();
-  });
-});
+async function refresh() {
+  const res = await fetch("/api/state", { cache: "no-store" });
+  if (!res.ok) {
+    $("verdict").innerHTML = `<div class="banner banner-fail">读取状态失败（HTTP ${res.status}）</div>`;
+    return;
+  }
+  render(await res.json());
+}
 
-$("upload-btn").addEventListener("click", async () => {
-  const input = $("csv-file");
-  clearMsg($("upload-msg"));
-  if (!input.files.length) { showMsg($("upload-msg"), "warn", "请先选择 CSV 文件"); return; }
+// ---- 底表上传
+$("base-btn").addEventListener("click", async () => {
+  clearMsg($("base-msg"));
+  const input = $("base-file");
+  if (!input.files.length) { showMsg($("base-msg"), "warn", "请先选择底表 CSV 文件"); return; }
   const fd = new FormData();
   fd.append("file", input.files[0]);
-  const res = await fetch("/api/upload", { method: "POST", body: fd });
-  const data = await res.json();
-  if (!res.ok) { showMsg($("upload-msg"), "error", data.detail || "上传失败"); return; }
-  showMsg($("upload-msg"), "ok", "底表已固定。");
-  await refresh();
+  const res = await fetch("/api/base", { method: "POST", body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { showMsg($("base-msg"), "error", data.detail || "上传失败"); return; }
+  showMsg($("base-msg"), "ok", "底表已固定，后续批次都将与它对比。");
+  render(data);
 });
 
-$("publish-btn").addEventListener("click", async () => {
-  clearMsg($("publish-msg"));
-  const groups = selectedGroups();
-  if (!groups.length) { showMsg($("publish-msg"), "warn", "请至少勾选一个组"); return; }
-  const res = await fetch("/api/publish", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ groups })
-  });
-  const data = await res.json();
-  if (res.status === 422 && data.leaked_groups) {
-    showMsg($("publish-msg"), "error",
-      `发布被拒绝：以下保密组的人数在全部可行整数底表中都相同，会泄露小组人数：\n` +
-      data.leaked_groups.map(g => `• ${g}`).join("\n") +
-      `\n本次合计未发布，发布历史保持不变。`);
-  } else if (!res.ok) {
-    showMsg($("publish-msg"), "error", data.detail || `请求失败（HTTP ${res.status}），本次未发布`);
-  } else {
-    showMsg($("publish-msg"), "ok",
-      `已接受发布，合计 = ${data.publication.published_total}，记录已写入发布历史。`);
+// ---- 批次上传
+$("batch-btn").addEventListener("click", async () => {
+  clearMsg($("batch-msg"));
+  const name = $("batch-name").value.trim();
+  const input = $("batch-file");
+  if (!name) { showMsg($("batch-msg"), "warn", "请填写批次名"); return; }
+  if (!input.files.length) { showMsg($("batch-msg"), "warn", "请先选择该批次的 CSV 文件"); return; }
+  const fd = new FormData();
+  fd.append("batch_name", name);
+  fd.append("file", input.files[0]);
+  const res = await fetch("/api/batches", { method: "POST", body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    showMsg($("batch-msg"), "error",
+      (data.detail || `上传失败（HTTP ${res.status}）`) +
+      "\n原批次与对账结果未受影响。");
+    return;
   }
-  await refresh();
+  const b = data.uploaded_batch;
+  showMsg($("batch-msg"), "ok",
+    `批次 ${b ? b.name : name} 已保存（v${b ? b.revision : 1}，${b ? b.row_count : 0} 行），对账报告已更新。`);
+  render(data);
+});
+
+// ---- 演示文件载入：以 Blob 放入文件框（浏览器不允许直接设置文件路径）
+async function loadDemoCsv(path) {
+  if (!demoFiles.has(path)) {
+    const res = await fetch(path, { cache: "no-store" });
+    if (!res.ok) throw new Error(`无法读取演示文件 ${path}`);
+    demoFiles.set(path, await res.text());
+  }
+  const text = demoFiles.get(path);
+  return new File([text], path.split("/").pop(), { type: "text/csv" });
+}
+
+function setFileInput(input, file) {
+  const dt = new DataTransfer();
+  dt.items.add(file);
+  input.files = dt.files;
+}
+
+$("load-base-sample").addEventListener("click", async () => {
+  try {
+    const f = await loadDemoCsv("samples/base_sample.csv");
+    setFileInput($("base-file"), f);
+    clearMsg($("base-msg"));
+    showMsg($("base-msg"), "ok", `已载入 ${f.name}，点击“上传并固定底表”。`);
+  } catch (e) {
+    showMsg($("base-msg"), "error", e.message);
+  }
+});
+
+document.querySelectorAll(".demo-csv").forEach(el => {
+  el.addEventListener("click", async () => {
+    try {
+      const f = await loadDemoCsv(el.dataset.path);
+      setFileInput($("batch-file"), f);
+      $("batch-name").value = el.dataset.batch;
+      clearMsg($("batch-msg"));
+      showMsg($("batch-msg"), "ok",
+        `已载入 ${f.name}，批次名 ${el.dataset.batch}，点击“上传 / 替换该批次”。`);
+    } catch (e) {
+      showMsg($("batch-msg"), "error", e.message);
+    }
+  });
 });
 
 refresh();
